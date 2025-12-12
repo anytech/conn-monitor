@@ -1,0 +1,51 @@
+[Unit]
+Description=Connection flood monitor
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/conn-monitor.sh
+Restart=always
+RestartSec=5
+
+# === CONFIGURATION ===
+# Uncomment and modify any settings below to override defaults.
+# All settings can also be placed in /etc/default/conn-monitor
+
+EnvironmentFile=-/etc/default/conn-monitor
+
+# Connection thresholds
+# Environment=THRESHOLD=100
+# Environment=SUBNET_THRESHOLD=75
+
+# Your server's IP (excluded from monitoring)
+# Environment=SERVER_IP=YOUR_SERVER_IP
+
+# Static whitelist - space-separated IP prefixes
+# Environment=STATIC_WHITELIST=127.0.0 10.0.0 192.168
+
+# Block expiry (seconds). 0 = permanent
+# Environment=IP_BLOCK_EXPIRY=0
+# Environment=RANGE_BLOCK_EXPIRY=0
+
+# Temporary range block mode: "permanent" or "temporary"
+# Environment=BLOCK_MODE=permanent
+
+# Duration for temporary blocks before harvesting IPs (seconds)
+# Environment=TEMP_BLOCK_DURATION=3600
+
+# Log settings
+# Environment=LOGFILE=/var/log/conn-monitor.log
+# Environment=LOG_PREFIX=CONN-MONITOR
+# Environment=SYSLOG_FILE=/var/log/kern.log
+
+# AbuseIPDB reporting (optional - requires free API key)
+# Get your key at: https://www.abuseipdb.com/account/api
+# Environment=ABUSEIPDB_ENABLED=yes
+# Environment=ABUSEIPDB_KEY=your_api_key_here
+# Environment=ABUSEIPDB_CATEGORIES=14,21
+# Environment=ABUSEIPDB_RATE_LIMIT=30
+# Environment=ABUSEIPDB_REPORT_RANGES=no  # Requires paid tier
+
+[Install]
+WantedBy=multi-user.target
