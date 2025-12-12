@@ -43,7 +43,7 @@ EnvironmentFile=-/etc/default/conn-monitor
 # Get your key at: https://www.abuseipdb.com/account/api
 # Environment=ABUSEIPDB_ENABLED=yes
 # Environment=ABUSEIPDB_KEY=your_api_key_here
-# Environment=ABUSEIPDB_CATEGORIES=14,21
+# Environment=ABUSEIPDB_CATEGORIES=4,21
 # Environment=ABUSEIPDB_RATE_LIMIT=30
 # Environment=ABUSEIPDB_REPORT_RANGES=no  # Requires paid tier
 

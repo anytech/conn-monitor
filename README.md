@@ -74,7 +74,7 @@ All settings can be configured in three ways:
 | `CF_UPDATE_INTERVAL` | `86400` | Seconds between Cloudflare IP updates |
 | `ABUSEIPDB_ENABLED` | `no` | Enable AbuseIPDB reporting (`yes`/`no`) |
 | `ABUSEIPDB_KEY` | *(empty)* | Your AbuseIPDB API key |
-| `ABUSEIPDB_CATEGORIES` | `14,21` | Category codes for reports |
+| `ABUSEIPDB_CATEGORIES` | `4,21` | Category codes for reports |
 | `ABUSEIPDB_RATE_LIMIT` | `30` | Minimum seconds between reports |
 | `ABUSEIPDB_REPORT_RANGES` | `no` | Report /16 ranges (requires paid tier) |
 
@@ -189,8 +189,8 @@ The free tier allows 3,000 reports per day (~1 every 29 seconds). The default `A
 
 ### Category Codes
 
-Default categories are `14,21` (Port Scan, Web App Attack). Common categories:
-- `14` - Port Scan
+Default categories are `4,21` (DDoS Attack, Web App Attack). Common categories:
+- `4` - DDoS Attack
 - `15` - Hacking
 - `21` - Web App Attack
 - `18` - Brute Force

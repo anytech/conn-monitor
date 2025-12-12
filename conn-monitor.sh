@@ -61,7 +61,7 @@ Temporary Range Block Mode:
 AbuseIPDB Reporting:
   ABUSEIPDB_ENABLED     Enable reporting: yes/no (default: no)
   ABUSEIPDB_KEY         Your API key from abuseipdb.com
-  ABUSEIPDB_CATEGORIES  Category codes, comma-separated (default: 14,21)
+  ABUSEIPDB_CATEGORIES  Category codes, comma-separated (default: 4,21)
   ABUSEIPDB_RATE_LIMIT  Min seconds between reports (default: 30)
   ABUSEIPDB_REPORT_RANGES  Report /16 ranges, requires paid tier (default: no)
 
@@ -340,9 +340,9 @@ ABUSEIPDB_ENABLED="${ABUSEIPDB_ENABLED:-no}"
 ABUSEIPDB_KEY="${ABUSEIPDB_KEY:-}"
 
 # AbuseIPDB category codes for reports (comma-separated)
-# 14 = Port Scan, 15 = Hacking, 21 = Web App Attack
+# 4 = DDoS Attack, 21 = Web App Attack
 # See: https://www.abuseipdb.com/categories
-ABUSEIPDB_CATEGORIES="${ABUSEIPDB_CATEGORIES:-14,21}"
+ABUSEIPDB_CATEGORIES="${ABUSEIPDB_CATEGORIES:-4,21}"
 
 # Rate limit: minimum seconds between reports (free tier = 3000/day, ~29s between)
 ABUSEIPDB_RATE_LIMIT="${ABUSEIPDB_RATE_LIMIT:-30}"
