@@ -370,6 +370,11 @@ ABUSEIPDB_BLACKLIST_INTERVAL="${ABUSEIPDB_BLACKLIST_INTERVAL:-86400}"
 
 # === END CONFIGURATION ===
 
+# Cache files for blacklist (persists across restarts)
+BLACKLIST_CACHE_DIR="/var/cache/conn-monitor"
+BLACKLIST_CACHE_FILE="$BLACKLIST_CACHE_DIR/blacklist.txt"
+BLACKLIST_CACHE_TIME="$BLACKLIST_CACHE_DIR/blacklist.time"
+
 LAST_CF_UPDATE=0
 LAST_ABUSEIPDB_REPORT=0
 LAST_BLACKLIST_UPDATE=0
@@ -699,6 +704,8 @@ init_ipset() {
         ipset create abuseipdb-blacklist hash:ip maxelem 100000
         echo "$(date): Created abuseipdb-blacklist ipset" >> $LOGFILE
     fi
+    # Create cache directory for blacklist
+    mkdir -p "$BLACKLIST_CACHE_DIR"
 }
 
 update_cloudflare_ips() {
@@ -718,11 +725,41 @@ update_cloudflare_ips() {
     LAST_CF_UPDATE=$(date +%s)
 }
 
+# Load blacklist from cache file into ipset
+load_blacklist_from_cache() {
+    [[ ! -f "$BLACKLIST_CACHE_FILE" ]] && return 1
+
+    ipset flush abuseipdb-blacklist
+    local count=0
+    while IFS= read -r ip; do
+        [[ -z "$ip" ]] && continue
+        [[ "$ip" == "#"* ]] && continue
+        ipset add abuseipdb-blacklist "$ip" 2>/dev/null && ((count++))
+    done < "$BLACKLIST_CACHE_FILE"
+
+    echo "$(date): Loaded AbuseIPDB blacklist from cache ($count IPs)" >> $LOGFILE
+    return 0
+}
+
 update_abuseipdb_blacklist() {
     [[ "$ABUSEIPDB_BLACKLIST_ENABLED" != "yes" ]] && return
     [[ -z "$ABUSEIPDB_KEY" ]] && return
 
-    # Fetch blacklist as plaintext (one IP per line)
+    local now=$(date +%s)
+
+    # Check if cache is fresh (skip API call if within interval)
+    if [[ -f "$BLACKLIST_CACHE_TIME" && -f "$BLACKLIST_CACHE_FILE" ]]; then
+        local cache_time=$(cat "$BLACKLIST_CACHE_TIME" 2>/dev/null || echo 0)
+        local cache_age=$((now - cache_time))
+        if [[ "$cache_age" -lt "$ABUSEIPDB_BLACKLIST_INTERVAL" ]]; then
+            # Cache is fresh, load from file instead of API
+            load_blacklist_from_cache
+            LAST_BLACKLIST_UPDATE=$cache_time
+            return
+        fi
+    fi
+
+    # Cache is stale or missing - fetch from API
     local blacklist=$(curl -s --connect-timeout 30 -G \
         "https://api.abuseipdb.com/api/v2/blacklist" \
         -d "confidenceMinimum=$ABUSEIPDB_BLACKLIST_CONFIDENCE" \
@@ -733,7 +770,9 @@ update_abuseipdb_blacklist() {
 
     if [[ -z "$blacklist" ]]; then
         echo "$(date): Failed to fetch AbuseIPDB blacklist" >> $LOGFILE
-        LAST_BLACKLIST_UPDATE=$(date +%s)
+        # Try loading from stale cache as fallback
+        load_blacklist_from_cache
+        LAST_BLACKLIST_UPDATE=$now
         return
     fi
 
@@ -741,9 +780,15 @@ update_abuseipdb_blacklist() {
     if [[ "$blacklist" == "{"* ]]; then
         local error=$(echo "$blacklist" | grep -oE '"message":"[^"]*"' | head -1)
         echo "$(date): AbuseIPDB blacklist error: $error" >> $LOGFILE
-        LAST_BLACKLIST_UPDATE=$(date +%s)
+        # Try loading from stale cache as fallback
+        load_blacklist_from_cache
+        LAST_BLACKLIST_UPDATE=$now
         return
     fi
+
+    # Save to cache
+    echo "$blacklist" > "$BLACKLIST_CACHE_FILE"
+    echo "$now" > "$BLACKLIST_CACHE_TIME"
 
     # Flush and repopulate the ipset
     ipset flush abuseipdb-blacklist
@@ -755,7 +800,7 @@ update_abuseipdb_blacklist() {
     done <<< "$blacklist"
 
     echo "$(date): Updated AbuseIPDB blacklist ipset ($count IPs, confidence >= $ABUSEIPDB_BLACKLIST_CONFIDENCE%)" >> $LOGFILE
-    LAST_BLACKLIST_UPDATE=$(date +%s)
+    LAST_BLACKLIST_UPDATE=$now
 }
 
 is_blacklisted() {
