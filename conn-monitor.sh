@@ -390,17 +390,16 @@ LAST_BLACKLIST_UPDATE=0
 BLOCKED_IPS_FILE="/tmp/conn-monitor-blocked-ips.$$"
 BLOCKED_RANGES_FILE="/tmp/conn-monitor-blocked-ranges.$$"
 TEMP_RANGES_FILE="/tmp/conn-monitor-temp-ranges.$$"
-ABUSEIPDB_QUEUE_FILE="/tmp/conn-monitor-abuseipdb-queue.$$"
+ABUSEIPDB_QUEUE_FILE="/tmp/conn-monitor-abuseipdb-queue"
 
-# Initialize tracking files
+# Initialize tracking files (not the queue - it persists for CLI use)
 > "$BLOCKED_IPS_FILE"
 > "$BLOCKED_RANGES_FILE"
 > "$TEMP_RANGES_FILE"
-> "$ABUSEIPDB_QUEUE_FILE"
 
-# Cleanup on exit
+# Cleanup on exit (queue file persists for CLI-added reports)
 cleanup() {
-    rm -f "$BLOCKED_IPS_FILE" "$BLOCKED_RANGES_FILE" "$TEMP_RANGES_FILE" "$ABUSEIPDB_QUEUE_FILE"
+    rm -f "$BLOCKED_IPS_FILE" "$BLOCKED_RANGES_FILE" "$TEMP_RANGES_FILE"
 }
 trap cleanup EXIT
 
