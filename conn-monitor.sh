@@ -12,6 +12,21 @@
 
 VERSION="1.2.0"
 CONFIG_FILE="/etc/default/conn-monitor"
+LOGFILE="${LOGFILE:-/var/log/conn-monitor.log}"
+
+# Data directory for persistent files
+CONN_MONITOR_DATA_DIR="/etc/conn-monitor"
+
+# Data files (persistent across restarts)
+TEMP_IPS_FILE="$CONN_MONITOR_DATA_DIR/temp-ips.log"
+PERM_IPS_FILE="$CONN_MONITOR_DATA_DIR/perm-ips.log"
+BLACKLIST_IPS_FILE="$CONN_MONITOR_DATA_DIR/blacklist-ips.log"
+TEMP_RANGES_FILE="$CONN_MONITOR_DATA_DIR/temp-ranges.log"
+PERM_RANGES_FILE="$CONN_MONITOR_DATA_DIR/perm-ranges.log"
+CAUGHT_IPS_FILE="$CONN_MONITOR_DATA_DIR/caught-ips.log"
+ABUSEIPDB_QUEUE_FILE="$CONN_MONITOR_DATA_DIR/abuseipdb-queue.log"
+BLACKLIST_CACHE_FILE="$CONN_MONITOR_DATA_DIR/blacklist-cache.log"
+BLACKLIST_CACHE_TIME="$CONN_MONITOR_DATA_DIR/blacklist-cache.time"
 
 # Valid configuration variables
 VALID_VARS="THRESHOLD SUBNET_THRESHOLD SERVER_IP STATIC_WHITELIST LOGFILE CF_UPDATE_INTERVAL IP_BLOCK_EXPIRY RANGE_BLOCK_EXPIRY BLOCK_MODE TEMP_BLOCK_DURATION ABUSEIPDB_ENABLED ABUSEIPDB_KEY ABUSEIPDB_CATEGORIES ABUSEIPDB_RATE_LIMIT ABUSEIPDB_REPORT_RANGES ABUSEIPDB_BLACKLIST_ENABLED ABUSEIPDB_BLACKLIST_CONFIDENCE ABUSEIPDB_BLACKLIST_LIMIT ABUSEIPDB_BLACKLIST_INTERVAL ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY"
@@ -256,6 +271,8 @@ do_unblock() {
         sed -i "/^$range /d" "$PERM_RANGES_FILE" 2>/dev/null
         sed -i "/^$range /d" "$TEMP_RANGES_FILE" 2>/dev/null
         sed -i "/|$range|/d" "$CAUGHT_IPS_FILE" 2>/dev/null
+
+        echo "$(date): UNBLOCK - Removed range $target" >> $LOGFILE
     else
         # It's an IP
         if iptables -L INPUT -n | grep -q " $target "; then
@@ -272,8 +289,11 @@ do_unblock() {
         sed -i "/^$target /d" "$BLACKLIST_IPS_FILE" 2>/dev/null
         sed -i "/^$target|/d" "$CAUGHT_IPS_FILE" 2>/dev/null
 
-        # Remove from blacklist ipset (prevents immediate re-block)
+        # Remove from blacklist ipset and cache (prevents re-block on next cache load)
         ipset del abuseipdb-blacklist "$target" 2>/dev/null
+        sed -i "/^$target$/d" "$BLACKLIST_CACHE_FILE" 2>/dev/null
+
+        echo "$(date): UNBLOCK - Removed IP $target" >> $LOGFILE
     fi
 
     exit 0
@@ -453,26 +473,9 @@ ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY="${ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY:-2592000}"
 
 # === END CONFIGURATION ===
 
-# Cache files for blacklist (persists across restarts)
-BLACKLIST_CACHE_DIR="/var/cache/conn-monitor"
-BLACKLIST_CACHE_FILE="$BLACKLIST_CACHE_DIR/blacklist.txt"
-BLACKLIST_CACHE_TIME="$BLACKLIST_CACHE_DIR/blacklist.time"
-
 LAST_CF_UPDATE=0
 LAST_ABUSEIPDB_REPORT=0
 LAST_BLACKLIST_UPDATE=0
-
-# Data directory for persistent files
-CONN_MONITOR_DATA_DIR="/etc/conn-monitor"
-
-# Data files (persistent across restarts)
-TEMP_IPS_FILE="$CONN_MONITOR_DATA_DIR/temp-ips.log"        # IPs with expiry (IP_BLOCK_EXPIRY > 0)
-PERM_IPS_FILE="$CONN_MONITOR_DATA_DIR/perm-ips.log"        # IPs blocked permanently
-BLACKLIST_IPS_FILE="$CONN_MONITOR_DATA_DIR/blacklist-ips.log"  # IPs from AbuseIPDB blacklist
-TEMP_RANGES_FILE="$CONN_MONITOR_DATA_DIR/temp-ranges.log"  # Ranges in temporary block mode
-PERM_RANGES_FILE="$CONN_MONITOR_DATA_DIR/perm-ranges.log"  # Ranges blocked permanently
-CAUGHT_IPS_FILE="$CONN_MONITOR_DATA_DIR/caught-ips.log"    # IPs pending processing (temp file)
-ABUSEIPDB_QUEUE_FILE="$CONN_MONITOR_DATA_DIR/abuseipdb-queue.log"
 
 # Initialize data directory and files (persistent across restarts)
 mkdir -p "$CONN_MONITOR_DATA_DIR"
@@ -917,8 +920,6 @@ init_ipset() {
         ipset create abuseipdb-blacklist hash:ip maxelem 100000
         echo "$(date): Created abuseipdb-blacklist ipset" >> $LOGFILE
     fi
-    # Create cache directory for blacklist
-    mkdir -p "$BLACKLIST_CACHE_DIR"
 }
 
 update_cloudflare_ips() {
