@@ -26,6 +26,9 @@ Usage: conn-monitor.sh [command]
 Commands:
   (none)                Run the monitor (normally via systemd)
   status                Show current configuration and blocked IPs
+  block <ip>            Manually block an IP address
+  block <range>/16      Manually block a /16 range (uses BLOCK_MODE setting)
+  block -report <ip>    Block and report to AbuseIPDB
   unblock <ip>          Unblock an IP address
   unblock <range>/16    Unblock a /16 range (e.g., 45.5.0.0/16)
   config                Show config file and current settings
@@ -34,6 +37,9 @@ Commands:
   -v, --version         Show version
 
 Examples:
+  conn-monitor.sh block 192.0.2.50
+  conn-monitor.sh block 138.121.0.0/16
+  conn-monitor.sh block -report 192.0.2.50
   conn-monitor.sh unblock 192.0.2.50
   conn-monitor.sh unblock 45.5.0.0/16
   conn-monitor.sh config set THRESHOLD=50
@@ -827,6 +833,97 @@ is_static_whitelisted() {
     done
     return 1
 }
+
+# Handle 'block' command (needs blocking functions defined above)
+do_block() {
+    local report_to_abuseipdb=false
+    local target=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -report)
+                report_to_abuseipdb=true
+                shift
+                ;;
+            *)
+                target="$1"
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$target" ]]; then
+        echo "Usage: conn-monitor.sh block [-report] <ip or range>"
+        echo ""
+        echo "Options:"
+        echo "  -report    Also report to AbuseIPDB"
+        echo ""
+        echo "Examples:"
+        echo "  conn-monitor.sh block 192.0.2.50"
+        echo "  conn-monitor.sh block 138.121.0.0/16"
+        echo "  conn-monitor.sh block -report 192.0.2.50"
+        exit 1
+    fi
+
+    # Check for root
+    if [[ $EUID -ne 0 ]]; then
+        echo "Error: Blocking requires root. Use: sudo conn-monitor.sh block $target"
+        exit 1
+    fi
+
+    # Check if it's a range (contains /16)
+    if [[ "$target" == *"/16" ]]; then
+        local range="${target%.0.0/16}"  # Extract 138.121 from 138.121.0.0/16
+        range="${range%.0/16}"           # Also handle 138.121.0/16 format
+
+        if iptables -C INPUT -s "$target" -j DROP 2>/dev/null; then
+            echo "Range $target is already blocked"
+            exit 1
+        fi
+
+        if [[ "$BLOCK_MODE" == "temporary" ]]; then
+            block_range_temporary "$range" "manual"
+            echo "Temporarily blocked range: $target (will harvest IPs after ${TEMP_BLOCK_DURATION}s)"
+        else
+            block_range_permanent "$range" "manual"
+            echo "Blocked range: $target"
+        fi
+
+        # Report range if requested (and paid tier)
+        if [[ "$report_to_abuseipdb" == true ]]; then
+            if [[ "$ABUSEIPDB_REPORT_RANGES" == "yes" ]]; then
+                queue_abuseipdb_report "$target" "manual" "manual block"
+                echo "Queued for AbuseIPDB report"
+            else
+                echo "Note: Range reporting requires ABUSEIPDB_REPORT_RANGES=yes (paid tier)"
+            fi
+        fi
+    else
+        # It's an IP
+        if iptables -C INPUT -s "$target" -j DROP 2>/dev/null; then
+            echo "IP $target is already blocked"
+            exit 1
+        fi
+
+        block_ip "$target" "manual" "manual block"
+        echo "Blocked IP: $target"
+
+        # Report to AbuseIPDB if requested
+        if [[ "$report_to_abuseipdb" == true ]]; then
+            queue_abuseipdb_report "$target" "manual" "manual block"
+            echo "Queued for AbuseIPDB report"
+        fi
+    fi
+
+    exit 0
+}
+
+# Handle block command (after functions are defined)
+if [[ "${1:-}" == "block" ]]; then
+    shift
+    do_block "$@"
+fi
 
 # Initialize
 init_ipset
