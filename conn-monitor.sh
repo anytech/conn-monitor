@@ -31,6 +31,7 @@ Commands:
   block -report <ip>    Block and report to AbuseIPDB
   unblock <ip>          Unblock an IP address
   unblock <range>/16    Unblock a /16 range (e.g., 45.5.0.0/16)
+  nuke                  Remove ALL blocks (IPs and ranges) and clear tracking
   config                Show config file and current settings
   config set VAR=value  Set configuration variable(s)
   -h, --help            Show this help message
@@ -239,15 +240,22 @@ do_unblock() {
 
     # Check if it's a range (contains /16)
     if [[ "$target" == *"/16" ]]; then
-        # It's a range - remove both DROP and LOG rules
+        # Extract the /16 prefix (e.g., "45.5" from "45.5.0.0/16")
+        local range=$(echo "$target" | grep -oE '^[0-9]+\.[0-9]+')
+
+        # It's a range - remove DROP rule
         if iptables -L INPUT -n | grep -q "$target"; then
             iptables -D INPUT -s "$target" -j DROP 2>/dev/null
-            iptables -D INPUT -s "$target" -j LOG 2>/dev/null  # In case temp block
             echo "Unblocked range: $target"
         else
             echo "Range $target is not currently blocked"
             exit 1
         fi
+
+        # Remove from tracking files
+        sed -i "/^$range /d" "$PERM_RANGES_FILE" 2>/dev/null
+        sed -i "/^$range /d" "$TEMP_RANGES_FILE" 2>/dev/null
+        sed -i "/|$range|/d" "$CAUGHT_IPS_FILE" 2>/dev/null
     else
         # It's an IP
         if iptables -L INPUT -n | grep -q " $target "; then
@@ -257,8 +265,77 @@ do_unblock() {
             echo "IP $target is not currently blocked"
             exit 1
         fi
+
+        # Remove from all tracking files
+        sed -i "/^$target$/d" "$PERM_IPS_FILE" 2>/dev/null
+        sed -i "/^$target /d" "$TEMP_IPS_FILE" 2>/dev/null
+        sed -i "/^$target /d" "$BLACKLIST_IPS_FILE" 2>/dev/null
+        sed -i "/^$target|/d" "$CAUGHT_IPS_FILE" 2>/dev/null
+
+        # Remove from blacklist ipset (prevents immediate re-block)
+        ipset del abuseipdb-blacklist "$target" 2>/dev/null
     fi
 
+    exit 0
+}
+
+# Nuke all blocks
+do_nuke() {
+    # Check for root
+    if [[ $EUID -ne 0 ]]; then
+        echo "Error: Nuke requires root. Use: sudo conn-monitor.sh nuke"
+        exit 1
+    fi
+
+    local ip_count=0
+    local range_count=0
+
+    # Remove all tracked IPs from iptables
+    while read -r ip; do
+        [[ -z "$ip" ]] && continue
+        iptables -D INPUT -s "$ip" -j DROP 2>/dev/null && ((ip_count++))
+    done < "$PERM_IPS_FILE"
+
+    while read -r ip timestamp; do
+        [[ -z "$ip" ]] && continue
+        iptables -D INPUT -s "$ip" -j DROP 2>/dev/null && ((ip_count++))
+    done < "$TEMP_IPS_FILE"
+
+    while read -r ip timestamp; do
+        [[ -z "$ip" ]] && continue
+        iptables -D INPUT -s "$ip" -j DROP 2>/dev/null && ((ip_count++))
+    done < "$BLACKLIST_IPS_FILE"
+
+    # Remove caught IPs (format: ip|range|timestamp)
+    while IFS='|' read -r ip range timestamp; do
+        [[ -z "$ip" ]] && continue
+        iptables -D INPUT -s "$ip" -j DROP 2>/dev/null && ((ip_count++))
+    done < "$CAUGHT_IPS_FILE"
+
+    # Remove all tracked ranges from iptables
+    while read -r range timestamp; do
+        [[ -z "$range" ]] && continue
+        local cidr="$range.0.0/16"
+        iptables -D INPUT -s "$cidr" -j DROP 2>/dev/null && ((range_count++))
+    done < "$PERM_RANGES_FILE"
+
+    while read -r range timestamp; do
+        [[ -z "$range" ]] && continue
+        local cidr="$range.0.0/16"
+        iptables -D INPUT -s "$cidr" -j DROP 2>/dev/null && ((range_count++))
+    done < "$TEMP_RANGES_FILE"
+
+    # Clear all tracking files
+    > "$PERM_IPS_FILE"
+    > "$TEMP_IPS_FILE"
+    > "$BLACKLIST_IPS_FILE"
+    > "$PERM_RANGES_FILE"
+    > "$TEMP_RANGES_FILE"
+    > "$CAUGHT_IPS_FILE"
+    > "$ABUSEIPDB_QUEUE_FILE"
+
+    echo "Nuked $ip_count IPs and $range_count ranges"
+    echo "$(date): NUKE - Cleared $ip_count IPs and $range_count ranges" >> $LOGFILE
     exit 0
 }
 
@@ -275,6 +352,9 @@ case "${1:-}" in
         ;;
     unblock)
         do_unblock "$2"
+        ;;
+    nuke)
+        do_nuke
         ;;
     config)
         if [[ "${2:-}" == "set" ]]; then
