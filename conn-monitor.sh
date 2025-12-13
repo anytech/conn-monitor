@@ -954,7 +954,7 @@ do_block() {
 
         if [[ "$BLOCK_MODE" == "temporary" ]]; then
             block_range_temporary "$range" "manual"
-            echo "Temporarily blocked range: $target (will harvest IPs after ${TEMP_BLOCK_DURATION}s)"
+            echo "Temporarily blocked range: $target (catching IPs for ${TEMP_BLOCK_DURATION}s)"
         else
             block_range_permanent "$range" "manual"
             echo "Blocked range: $target"
