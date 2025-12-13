@@ -75,6 +75,10 @@ All settings can be configured in three ways:
 | `ABUSEIPDB_CATEGORIES` | `4,21` | Category codes for reports |
 | `ABUSEIPDB_RATE_LIMIT` | `30` | Minimum seconds between reports |
 | `ABUSEIPDB_REPORT_RANGES` | `no` | Report /16 ranges (requires paid tier) |
+| `ABUSEIPDB_BLACKLIST_ENABLED` | `no` | Proactively block IPs from AbuseIPDB blacklist |
+| `ABUSEIPDB_BLACKLIST_CONFIDENCE` | `90` | Minimum confidence score (1-100) to block |
+| `ABUSEIPDB_BLACKLIST_LIMIT` | `1000` | Max IPs to fetch from blacklist (free tier: 10,000/day) |
+| `ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY` | `2592000` | Seconds until blacklist blocks expire (30 days) |
 
 ### Example: Using Environment File
 
@@ -256,7 +260,7 @@ Adjust based on your traffic patterns. Lower = more aggressive blocking.
 ## Notes
 
 - Block data persists in `/etc/conn-monitor/` and is restored on service restart
-- Data files track temporary IPs (`temp-ips.log`), permanent IPs (`perm-ips.log`), and ranges
+- Data files track temporary IPs (`temp-ips.log`), permanent IPs (`perm-ips.log`), blacklist IPs (`blacklist-ips.log`), and ranges
 - Works best with servers behind Cloudflare proxy
 - For non-Cloudflare setups, adjust the whitelist accordingly
 

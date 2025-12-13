@@ -45,5 +45,11 @@ EnvironmentFile=-/etc/default/conn-monitor
 # Environment=ABUSEIPDB_RATE_LIMIT=30
 # Environment=ABUSEIPDB_REPORT_RANGES=no  # Requires paid tier
 
+# AbuseIPDB blacklist - proactively block known bad IPs
+# Environment=ABUSEIPDB_BLACKLIST_ENABLED=no
+# Environment=ABUSEIPDB_BLACKLIST_CONFIDENCE=90
+# Environment=ABUSEIPDB_BLACKLIST_LIMIT=1000
+# Environment=ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY=2592000  # 30 days
+
 [Install]
 WantedBy=multi-user.target

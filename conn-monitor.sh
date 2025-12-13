@@ -14,7 +14,7 @@ VERSION="1.2.0"
 CONFIG_FILE="/etc/default/conn-monitor"
 
 # Valid configuration variables
-VALID_VARS="THRESHOLD SUBNET_THRESHOLD SERVER_IP STATIC_WHITELIST LOGFILE CF_UPDATE_INTERVAL IP_BLOCK_EXPIRY RANGE_BLOCK_EXPIRY BLOCK_MODE TEMP_BLOCK_DURATION ABUSEIPDB_ENABLED ABUSEIPDB_KEY ABUSEIPDB_CATEGORIES ABUSEIPDB_RATE_LIMIT ABUSEIPDB_REPORT_RANGES ABUSEIPDB_BLACKLIST_ENABLED ABUSEIPDB_BLACKLIST_CONFIDENCE ABUSEIPDB_BLACKLIST_LIMIT ABUSEIPDB_BLACKLIST_INTERVAL"
+VALID_VARS="THRESHOLD SUBNET_THRESHOLD SERVER_IP STATIC_WHITELIST LOGFILE CF_UPDATE_INTERVAL IP_BLOCK_EXPIRY RANGE_BLOCK_EXPIRY BLOCK_MODE TEMP_BLOCK_DURATION ABUSEIPDB_ENABLED ABUSEIPDB_KEY ABUSEIPDB_CATEGORIES ABUSEIPDB_RATE_LIMIT ABUSEIPDB_REPORT_RANGES ABUSEIPDB_BLACKLIST_ENABLED ABUSEIPDB_BLACKLIST_CONFIDENCE ABUSEIPDB_BLACKLIST_LIMIT ABUSEIPDB_BLACKLIST_INTERVAL ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY"
 
 # Show help
 show_help() {
@@ -74,6 +74,7 @@ AbuseIPDB Blacklist (proactive blocking):
   ABUSEIPDB_BLACKLIST_CONFIDENCE Min confidence score 25-100 (default: 75)
   ABUSEIPDB_BLACKLIST_LIMIT      Max IPs to fetch (default: 10000)
   ABUSEIPDB_BLACKLIST_INTERVAL   Seconds between updates (default: 86400)
+  ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY  Seconds until blacklist blocks expire (default: 2592000 = 30 days)
 
 Config file: $CONFIG_FILE
 
@@ -366,6 +367,10 @@ ABUSEIPDB_BLACKLIST_LIMIT="${ABUSEIPDB_BLACKLIST_LIMIT:-10000}"
 # Free tier allows 10 requests/day, so don't set below 8640 (2.4h)
 ABUSEIPDB_BLACKLIST_INTERVAL="${ABUSEIPDB_BLACKLIST_INTERVAL:-86400}"
 
+# How long to block IPs from blacklist (seconds). 0 = permanent
+# Default 30 days - prevents iptables bloat while still blocking active threats
+ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY="${ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY:-2592000}"
+
 # === END CONFIGURATION ===
 
 # Cache files for blacklist (persists across restarts)
@@ -383,6 +388,7 @@ CONN_MONITOR_DATA_DIR="/etc/conn-monitor"
 # Data files (persistent across restarts)
 TEMP_IPS_FILE="$CONN_MONITOR_DATA_DIR/temp-ips.log"        # IPs with expiry (IP_BLOCK_EXPIRY > 0)
 PERM_IPS_FILE="$CONN_MONITOR_DATA_DIR/perm-ips.log"        # IPs blocked permanently
+BLACKLIST_IPS_FILE="$CONN_MONITOR_DATA_DIR/blacklist-ips.log"  # IPs from AbuseIPDB blacklist
 TEMP_RANGES_FILE="$CONN_MONITOR_DATA_DIR/temp-ranges.log"  # Ranges in temporary block mode
 PERM_RANGES_FILE="$CONN_MONITOR_DATA_DIR/perm-ranges.log"  # Ranges blocked permanently
 CAUGHT_IPS_FILE="$CONN_MONITOR_DATA_DIR/caught-ips.log"    # IPs pending processing (temp file)
@@ -390,7 +396,7 @@ ABUSEIPDB_QUEUE_FILE="$CONN_MONITOR_DATA_DIR/abuseipdb-queue.log"
 
 # Initialize data directory and files (persistent across restarts)
 mkdir -p "$CONN_MONITOR_DATA_DIR"
-touch "$TEMP_IPS_FILE" "$PERM_IPS_FILE" "$TEMP_RANGES_FILE" "$PERM_RANGES_FILE" "$CAUGHT_IPS_FILE" "$ABUSEIPDB_QUEUE_FILE"
+touch "$TEMP_IPS_FILE" "$PERM_IPS_FILE" "$BLACKLIST_IPS_FILE" "$TEMP_RANGES_FILE" "$PERM_RANGES_FILE" "$CAUGHT_IPS_FILE" "$ABUSEIPDB_QUEUE_FILE"
 
 # Restore blocks from persistent files on startup
 restore_blocks() {
@@ -422,6 +428,23 @@ restore_blocks() {
         remaining+="$ip $timestamp"$'\n'
     done < "$TEMP_IPS_FILE"
     echo -n "$remaining" > "$TEMP_IPS_FILE"
+
+    # Restore blacklist IPs (check if still valid)
+    remaining=""
+    while read -r ip timestamp; do
+        [[ -z "$ip" ]] && continue
+        local age=$((now - timestamp))
+        if [[ "$ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY" -gt 0 && "$age" -ge "$ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY" ]]; then
+            # Already expired, skip
+            continue
+        fi
+        if ! iptables -C INPUT -s "$ip" -j DROP 2>/dev/null; then
+            iptables -I INPUT 1 -s "$ip" -j DROP
+            ((count++))
+        fi
+        remaining+="$ip $timestamp"$'\n'
+    done < "$BLACKLIST_IPS_FILE"
+    echo -n "$remaining" > "$BLACKLIST_IPS_FILE"
 
     # Restore permanent ranges (clean up expired ones)
     local remaining_ranges=""
@@ -536,6 +559,13 @@ track_perm_ip() {
     echo "$ip" >> "$PERM_IPS_FILE"
 }
 
+# Track an IP from AbuseIPDB blacklist (separate expiry)
+track_blacklist_ip() {
+    local ip=$1
+    local timestamp=$(date +%s)
+    echo "$ip $timestamp" >> "$BLACKLIST_IPS_FILE"
+}
+
 # Track a permanent range with timestamp (for RANGE_BLOCK_EXPIRY)
 track_perm_range() {
     local range=$1
@@ -550,10 +580,10 @@ track_temp_range() {
     echo "$range $timestamp" >> "$TEMP_RANGES_FILE"
 }
 
-# Check if IP is already tracked (temp or perm)
+# Check if IP is already tracked (temp, perm, or blacklist)
 is_ip_tracked() {
     local ip=$1
-    grep -q "^$ip" "$TEMP_IPS_FILE" 2>/dev/null || grep -q "^$ip$" "$PERM_IPS_FILE" 2>/dev/null
+    grep -q "^$ip" "$TEMP_IPS_FILE" 2>/dev/null || grep -q "^$ip$" "$PERM_IPS_FILE" 2>/dev/null || grep -q "^$ip " "$BLACKLIST_IPS_FILE" 2>/dev/null
 }
 
 # Check if range is already tracked (permanent)
@@ -635,8 +665,14 @@ block_ip() {
     iptables -I INPUT 1 -s "$ip" -j DROP
     conntrack -D -s "$ip" 2>/dev/null
 
-    # Track: temp if expiry enabled, perm otherwise
-    if [[ "$IP_BLOCK_EXPIRY" -gt 0 ]]; then
+    # Track based on reason and expiry settings
+    if [[ "$reason" == "AbuseIPDB blacklist" ]]; then
+        if [[ "$ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY" -gt 0 ]]; then
+            track_blacklist_ip "$ip"
+        else
+            track_perm_ip "$ip"
+        fi
+    elif [[ "$IP_BLOCK_EXPIRY" -gt 0 ]]; then
         track_temp_ip "$ip"
     else
         track_perm_ip "$ip"
@@ -747,6 +783,27 @@ check_ip_expiry() {
     done < "$TEMP_IPS_FILE"
 
     echo -n "$remaining" > "$TEMP_IPS_FILE"
+}
+
+# Check and remove expired blacklist IP blocks
+check_blacklist_ip_expiry() {
+    [[ "$ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY" -eq 0 ]] && return
+
+    local now=$(date +%s)
+    local remaining=""
+
+    while read -r ip timestamp; do
+        [[ -z "$ip" ]] && continue
+        local age=$((now - timestamp))
+        if [[ "$age" -ge "$ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY" ]]; then
+            iptables -D INPUT -s "$ip" -j DROP 2>/dev/null
+            echo "$(date): Expired blacklist IP block removed: $ip (after ${age}s)" >> $LOGFILE
+        else
+            remaining+="$ip $timestamp"$'\n'
+        fi
+    done < "$BLACKLIST_IPS_FILE"
+
+    echo -n "$remaining" > "$BLACKLIST_IPS_FILE"
 }
 
 # Check and remove expired range blocks (permanent ranges only)
@@ -1013,6 +1070,7 @@ while true; do
 
     # Check for expired blocks
     check_ip_expiry
+    check_blacklist_ip_expiry
     check_range_expiry
     if [[ "$BLOCK_MODE" == "temporary" ]]; then
         check_temp_range_expiry
