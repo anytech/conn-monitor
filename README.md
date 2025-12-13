@@ -69,8 +69,6 @@ All settings can be configured in three ways:
 | `BLOCK_MODE` | `permanent` | `permanent` or `temporary` for /16 ranges |
 | `TEMP_BLOCK_DURATION` | `3600` | Seconds to hold temporary range blocks |
 | `LOGFILE` | `/var/log/conn-monitor.log` | Log file location |
-| `LOG_PREFIX` | `CONN-MONITOR` | iptables LOG prefix for temporary blocks |
-| `SYSLOG_FILE` | `/var/log/kern.log` | Syslog file to parse for caught IPs |
 | `CF_UPDATE_INTERVAL` | `86400` | Seconds between Cloudflare IP updates |
 | `ABUSEIPDB_ENABLED` | `no` | Enable AbuseIPDB reporting (`yes`/`no`) |
 | `ABUSEIPDB_KEY` | *(empty)* | Your AbuseIPDB API key |
@@ -133,19 +131,21 @@ TEMP_BLOCK_DURATION=3600
 ```
 
 When a /16 subnet exceeds the threshold:
-1. The entire /16 is blocked AND logged via iptables LOG
-2. For `TEMP_BLOCK_DURATION` seconds, all blocked IPs are recorded in syslog
-3. After the duration expires:
-   - Individual IPs that hit the block are permanently banned
-   - The /16 range block is removed
-   - Legitimate users from that range can connect again
+1. The entire /16 is blocked
+2. During the block, individual IPs attempting to connect are caught and blocked permanently
+3. Caught IPs are reported to AbuseIPDB in real-time
+4. After `TEMP_BLOCK_DURATION` seconds, the range block is lifted
+5. If the range exceeds the threshold again, it gets temp-blocked again
 
 **Use case:** Catch attackers from a botnet without permanently blocking entire countries. The range acts as a temporary net - catch the bad IPs, then release innocent traffic.
 
+Data files are stored in `/etc/conn-monitor/` and persist across restarts.
+
 Log output example:
 ```
-Temporary block on 45.5.0.0/16 (150 connections), logging individual IPs for 3600s
-Released 45.5.0.0/16, caught and banned 47 individual IPs
+Temporary block on 45.5.0.0/16 (150 connections) for 3600s
+Blocked IP 45.5.123.45 (caught from temp block on 45.5.0.0/16)
+Released temp block on 45.5.0.0/16
 ```
 
 ### Block Expiry
@@ -255,11 +255,10 @@ Adjust based on your traffic patterns. Lower = more aggressive blocking.
 
 ## Notes
 
-- Blocks are not persisted across reboots by default (intentional - lets you recover from false positives)
-- To persist blocks: `apt install iptables-persistent && netfilter-persistent save`
+- Block data persists in `/etc/conn-monitor/` and is restored on service restart
+- Data files track temporary IPs (`temp-ips.log`), permanent IPs (`perm-ips.log`), and ranges
 - Works best with servers behind Cloudflare proxy
 - For non-Cloudflare setups, adjust the whitelist accordingly
-- Temporary range mode requires iptables LOG support (standard on most kernels)
 
 ## License
 

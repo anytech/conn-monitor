@@ -31,13 +31,11 @@ EnvironmentFile=-/etc/default/conn-monitor
 # Temporary range block mode: "permanent" or "temporary"
 # Environment=BLOCK_MODE=permanent
 
-# Duration for temporary blocks before harvesting IPs (seconds)
+# Duration for temporary blocks (seconds)
 # Environment=TEMP_BLOCK_DURATION=3600
 
-# Log settings
+# Log file location
 # Environment=LOGFILE=/var/log/conn-monitor.log
-# Environment=LOG_PREFIX=CONN-MONITOR
-# Environment=SYSLOG_FILE=/var/log/kern.log
 
 # AbuseIPDB reporting (optional - requires free API key)
 # Get your key at: https://www.abuseipdb.com/account/api

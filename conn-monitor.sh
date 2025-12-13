@@ -14,7 +14,7 @@ VERSION="1.2.0"
 CONFIG_FILE="/etc/default/conn-monitor"
 
 # Valid configuration variables
-VALID_VARS="THRESHOLD SUBNET_THRESHOLD SERVER_IP STATIC_WHITELIST LOGFILE CF_UPDATE_INTERVAL IP_BLOCK_EXPIRY RANGE_BLOCK_EXPIRY BLOCK_MODE TEMP_BLOCK_DURATION LOG_PREFIX SYSLOG_FILE ABUSEIPDB_ENABLED ABUSEIPDB_KEY ABUSEIPDB_CATEGORIES ABUSEIPDB_RATE_LIMIT ABUSEIPDB_REPORT_RANGES ABUSEIPDB_BLACKLIST_ENABLED ABUSEIPDB_BLACKLIST_CONFIDENCE ABUSEIPDB_BLACKLIST_LIMIT ABUSEIPDB_BLACKLIST_INTERVAL"
+VALID_VARS="THRESHOLD SUBNET_THRESHOLD SERVER_IP STATIC_WHITELIST LOGFILE CF_UPDATE_INTERVAL IP_BLOCK_EXPIRY RANGE_BLOCK_EXPIRY BLOCK_MODE TEMP_BLOCK_DURATION ABUSEIPDB_ENABLED ABUSEIPDB_KEY ABUSEIPDB_CATEGORIES ABUSEIPDB_RATE_LIMIT ABUSEIPDB_REPORT_RANGES ABUSEIPDB_BLACKLIST_ENABLED ABUSEIPDB_BLACKLIST_CONFIDENCE ABUSEIPDB_BLACKLIST_LIMIT ABUSEIPDB_BLACKLIST_INTERVAL"
 
 # Show help
 show_help() {
@@ -60,9 +60,7 @@ Block Expiry:
 
 Temporary Range Block Mode:
   BLOCK_MODE            "permanent" or "temporary" for /16 ranges (default: permanent)
-  TEMP_BLOCK_DURATION   Seconds to hold temp blocks before harvesting (default: 3600)
-  LOG_PREFIX            iptables LOG prefix (default: CONN-MONITOR)
-  SYSLOG_FILE           Syslog file to parse (default: /var/log/kern.log)
+  TEMP_BLOCK_DURATION   Seconds to hold temp blocks (default: 3600)
 
 AbuseIPDB Reporting:
   ABUSEIPDB_ENABLED     Enable reporting: yes/no (default: no)
@@ -324,18 +322,12 @@ RANGE_BLOCK_EXPIRY="${RANGE_BLOCK_EXPIRY:-0}"
 
 # BLOCK_MODE for /16 ranges:
 #   "permanent" = block ranges permanently (subject to RANGE_BLOCK_EXPIRY)
-#   "temporary" = block range, log IPs, harvest individuals, then release range
+#   "temporary" = block range, catch individual IPs, then release range
 BLOCK_MODE="${BLOCK_MODE:-permanent}"
 
-# Duration to hold temporary range blocks (seconds) before harvesting IPs
+# Duration to hold temporary range blocks (seconds)
 # Only used when BLOCK_MODE="temporary"
 TEMP_BLOCK_DURATION="${TEMP_BLOCK_DURATION:-3600}"
-
-# Prefix for iptables LOG entries (used to identify our log entries in syslog)
-LOG_PREFIX="${LOG_PREFIX:-CONN-MONITOR}"
-
-# Syslog file to parse for caught IPs (kern.log or syslog depending on distro)
-SYSLOG_FILE="${SYSLOG_FILE:-/var/log/kern.log}"
 
 # === ABUSEIPDB REPORTING ===
 
@@ -385,23 +377,92 @@ LAST_CF_UPDATE=0
 LAST_ABUSEIPDB_REPORT=0
 LAST_BLACKLIST_UPDATE=0
 
-# Data structures for tracking blocks with timestamps
-# Using temp files as associative arrays (bash 3 compatibility)
-BLOCKED_IPS_FILE="/tmp/conn-monitor-blocked-ips.$$"
-BLOCKED_RANGES_FILE="/tmp/conn-monitor-blocked-ranges.$$"
-TEMP_RANGES_FILE="/tmp/conn-monitor-temp-ranges.$$"
-ABUSEIPDB_QUEUE_FILE="/tmp/conn-monitor-abuseipdb-queue"
+# Data directory for persistent files
+CONN_MONITOR_DATA_DIR="/etc/conn-monitor"
 
-# Initialize tracking files (not the queue - it persists for CLI use)
-> "$BLOCKED_IPS_FILE"
-> "$BLOCKED_RANGES_FILE"
-> "$TEMP_RANGES_FILE"
+# Data files (persistent across restarts)
+TEMP_IPS_FILE="$CONN_MONITOR_DATA_DIR/temp-ips.log"        # IPs with expiry (IP_BLOCK_EXPIRY > 0)
+PERM_IPS_FILE="$CONN_MONITOR_DATA_DIR/perm-ips.log"        # IPs blocked permanently
+TEMP_RANGES_FILE="$CONN_MONITOR_DATA_DIR/temp-ranges.log"  # Ranges in temporary block mode
+PERM_RANGES_FILE="$CONN_MONITOR_DATA_DIR/perm-ranges.log"  # Ranges blocked permanently
+CAUGHT_IPS_FILE="$CONN_MONITOR_DATA_DIR/caught-ips.log"    # IPs pending processing (temp file)
+ABUSEIPDB_QUEUE_FILE="$CONN_MONITOR_DATA_DIR/abuseipdb-queue.log"
 
-# Cleanup on exit (queue file persists for CLI-added reports)
-cleanup() {
-    rm -f "$BLOCKED_IPS_FILE" "$BLOCKED_RANGES_FILE" "$TEMP_RANGES_FILE"
+# Initialize data directory and files (persistent across restarts)
+mkdir -p "$CONN_MONITOR_DATA_DIR"
+touch "$TEMP_IPS_FILE" "$PERM_IPS_FILE" "$TEMP_RANGES_FILE" "$PERM_RANGES_FILE" "$CAUGHT_IPS_FILE" "$ABUSEIPDB_QUEUE_FILE"
+
+# Restore blocks from persistent files on startup
+restore_blocks() {
+    local count=0
+
+    # Restore permanent IPs
+    while read -r ip; do
+        [[ -z "$ip" ]] && continue
+        if ! iptables -C INPUT -s "$ip" -j DROP 2>/dev/null; then
+            iptables -I INPUT 1 -s "$ip" -j DROP
+            ((count++))
+        fi
+    done < "$PERM_IPS_FILE"
+
+    # Restore temporary IPs (check if still valid)
+    local now=$(date +%s)
+    local remaining=""
+    while read -r ip timestamp; do
+        [[ -z "$ip" ]] && continue
+        local age=$((now - timestamp))
+        if [[ "$IP_BLOCK_EXPIRY" -gt 0 && "$age" -ge "$IP_BLOCK_EXPIRY" ]]; then
+            # Already expired, skip
+            continue
+        fi
+        if ! iptables -C INPUT -s "$ip" -j DROP 2>/dev/null; then
+            iptables -I INPUT 1 -s "$ip" -j DROP
+            ((count++))
+        fi
+        remaining+="$ip $timestamp"$'\n'
+    done < "$TEMP_IPS_FILE"
+    echo -n "$remaining" > "$TEMP_IPS_FILE"
+
+    # Restore permanent ranges (clean up expired ones)
+    local remaining_ranges=""
+    while read -r range timestamp; do
+        [[ -z "$range" ]] && continue
+        local cidr="$range.0.0/16"
+        local age=$((now - timestamp))
+        if [[ "$RANGE_BLOCK_EXPIRY" -gt 0 && "$age" -ge "$RANGE_BLOCK_EXPIRY" ]]; then
+            # Expired, don't restore or keep
+            continue
+        fi
+        if ! iptables -C INPUT -s "$cidr" -j DROP 2>/dev/null; then
+            iptables -I INPUT 1 -s "$cidr" -j DROP
+            ((count++))
+        fi
+        remaining_ranges+="$range $timestamp"$'\n'
+    done < "$PERM_RANGES_FILE"
+    echo -n "$remaining_ranges" > "$PERM_RANGES_FILE"
+
+    # Restore temporary ranges
+    remaining=""
+    while read -r range timestamp; do
+        [[ -z "$range" ]] && continue
+        local cidr="$range.0.0/16"
+        local age=$((now - timestamp))
+        if [[ "$age" -ge "$TEMP_BLOCK_DURATION" ]]; then
+            # Already expired, skip
+            continue
+        fi
+        if ! iptables -C INPUT -s "$cidr" -j DROP 2>/dev/null; then
+            iptables -I INPUT 1 -s "$cidr" -j DROP
+            ((count++))
+        fi
+        remaining+="$range $timestamp"$'\n'
+    done < "$TEMP_RANGES_FILE"
+    echo -n "$remaining" > "$TEMP_RANGES_FILE"
+
+    if [[ "$count" -gt 0 ]]; then
+        echo "$(date): Restored $count blocks from persistent storage" >> $LOGFILE
+    fi
 }
-trap cleanup EXIT
 
 # Queue an IP for AbuseIPDB reporting
 queue_abuseipdb_report() {
@@ -462,18 +523,24 @@ process_abuseipdb_queue() {
     LAST_ABUSEIPDB_REPORT=$now
 }
 
-# Track a blocked IP with timestamp
-track_blocked_ip() {
+# Track a temporary IP (has expiry)
+track_temp_ip() {
     local ip=$1
     local timestamp=$(date +%s)
-    echo "$ip $timestamp" >> "$BLOCKED_IPS_FILE"
+    echo "$ip $timestamp" >> "$TEMP_IPS_FILE"
 }
 
-# Track a blocked range with timestamp (permanent mode)
-track_blocked_range() {
+# Track a permanent IP (no expiry)
+track_perm_ip() {
+    local ip=$1
+    echo "$ip" >> "$PERM_IPS_FILE"
+}
+
+# Track a permanent range with timestamp (for RANGE_BLOCK_EXPIRY)
+track_perm_range() {
     local range=$1
     local timestamp=$(date +%s)
-    echo "$range $timestamp" >> "$BLOCKED_RANGES_FILE"
+    echo "$range $timestamp" >> "$PERM_RANGES_FILE"
 }
 
 # Track a temporary range block with timestamp
@@ -483,16 +550,16 @@ track_temp_range() {
     echo "$range $timestamp" >> "$TEMP_RANGES_FILE"
 }
 
-# Check if IP is already tracked
+# Check if IP is already tracked (temp or perm)
 is_ip_tracked() {
     local ip=$1
-    grep -q "^$ip " "$BLOCKED_IPS_FILE" 2>/dev/null
+    grep -q "^$ip" "$TEMP_IPS_FILE" 2>/dev/null || grep -q "^$ip$" "$PERM_IPS_FILE" 2>/dev/null
 }
 
 # Check if range is already tracked (permanent)
 is_range_tracked() {
     local range=$1
-    grep -q "^$range " "$BLOCKED_RANGES_FILE" 2>/dev/null
+    grep -q "^$range " "$PERM_RANGES_FILE" 2>/dev/null
 }
 
 # Check if range is tracked as temporary
@@ -501,7 +568,7 @@ is_temp_range_tracked() {
     grep -q "^$range " "$TEMP_RANGES_FILE" 2>/dev/null
 }
 
-# Block a range temporarily with LOG rule to capture individual IPs
+# Block a range temporarily (no LOG rule - IPs caught via ss in main loop)
 block_range_temporary() {
     local range=$1
     local count=$2
@@ -512,12 +579,8 @@ block_range_temporary() {
         return
     fi
 
-    # Add LOG rule first (before DROP) to capture IPs hitting this range
-    iptables -I INPUT 1 -s "$cidr" -j LOG --log-prefix "${LOG_PREFIX}-${range}: " --log-level 4
-    # Then add DROP rule
-    iptables -I INPUT 2 -s "$cidr" -j DROP
-
-    # Kill existing connections
+    # Just DROP, no LOG needed
+    iptables -I INPUT 1 -s "$cidr" -j DROP
     conntrack -D -s "$cidr" 2>/dev/null
 
     # Track this temporary block
@@ -528,7 +591,7 @@ block_range_temporary() {
         queue_abuseipdb_report "$cidr" "$count" "subnet flood (temp block)"
     fi
 
-    echo "$(date): Temporary block on $cidr ($count connections), logging individual IPs for ${TEMP_BLOCK_DURATION}s" >> $LOGFILE
+    echo "$(date): Temporary block on $cidr ($count connections) for ${TEMP_BLOCK_DURATION}s" >> $LOGFILE
 }
 
 # Block a range permanently (with optional expiry)
@@ -547,7 +610,7 @@ block_range_permanent() {
 
     # Track for expiry if enabled
     if [[ "$RANGE_BLOCK_EXPIRY" -gt 0 ]]; then
-        track_blocked_range "$range"
+        track_perm_range "$range"
     fi
 
     # Queue range for AbuseIPDB reporting (paid tier only)
@@ -572,9 +635,11 @@ block_ip() {
     iptables -I INPUT 1 -s "$ip" -j DROP
     conntrack -D -s "$ip" 2>/dev/null
 
-    # Track for expiry if enabled
+    # Track: temp if expiry enabled, perm otherwise
     if [[ "$IP_BLOCK_EXPIRY" -gt 0 ]]; then
-        track_blocked_ip "$ip"
+        track_temp_ip "$ip"
+    else
+        track_perm_ip "$ip"
     fi
 
     # Queue for AbuseIPDB reporting (skip if already on blacklist - no need to re-report)
@@ -585,43 +650,54 @@ block_ip() {
     echo "$(date): Blocked IP $ip ($count connections, $reason)" >> $LOGFILE
 }
 
-# Harvest IPs from syslog for a specific range and ban them individually
-harvest_ips_from_range() {
-    local range=$1
-    local cidr="$range.0.0/16"
-    local log_tag="${LOG_PREFIX}-${range}:"
+# Record an IP caught during temp range block
+catch_ip_from_range() {
+    local ip=$1
+    local range=$2
 
-    # Parse syslog for IPs that hit this range's LOG rule
-    # Extract unique IPs from log entries matching our prefix
-    local caught_ips=$(grep "$log_tag" "$SYSLOG_FILE" 2>/dev/null | \
-        grep -oE 'SRC=[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | \
-        cut -d= -f2 | sort -u)
+    # Skip if already in caught file or already blocked
+    if grep -q "^$ip|" "$CAUGHT_IPS_FILE" 2>/dev/null; then
+        return
+    fi
+    if iptables -C INPUT -s "$ip" -j DROP 2>/dev/null; then
+        return
+    fi
 
-    local ip_count=0
-    for ip in $caught_ips; do
-        # Skip if already blocked
-        if iptables -L INPUT -n | grep -q " $ip "; then
-            continue
+    # Add to caught file: ip|range|timestamp
+    echo "$ip|$range|$(date +%s)" >> "$CAUGHT_IPS_FILE"
+}
+
+# Process caught IPs: block them, report to AbuseIPDB, remove from file
+process_caught_ips() {
+    [[ ! -s "$CAUGHT_IPS_FILE" ]] && return
+
+    local temp_file="${CAUGHT_IPS_FILE}.tmp"
+    > "$temp_file"
+
+    while IFS='|' read -r ip range timestamp; do
+        [[ -z "$ip" ]] && continue
+
+        # Block the IP individually
+        if ! iptables -C INPUT -s "$ip" -j DROP 2>/dev/null; then
+            iptables -I INPUT 1 -s "$ip" -j DROP
+            conntrack -D -s "$ip" 2>/dev/null
+
+            # Track: temp if expiry enabled, perm otherwise
+            if [[ "$IP_BLOCK_EXPIRY" -gt 0 ]]; then
+                track_temp_ip "$ip"
+            else
+                track_perm_ip "$ip"
+            fi
+
+            # Queue for AbuseIPDB reporting
+            queue_abuseipdb_report "$ip" "1" "caught from temp block on $range.0.0/16"
+
+            echo "$(date): Blocked IP $ip (caught from temp block on $range.0.0/16)" >> $LOGFILE
         fi
+        # Don't write back to temp file - entry is processed and removed
+    done < "$CAUGHT_IPS_FILE"
 
-        # Skip whitelisted
-        if is_cloudflare "$ip" || is_static_whitelisted "$ip"; then
-            continue
-        fi
-
-        # Ban this individual IP permanently
-        iptables -I INPUT 1 -s "$ip" -j DROP
-        if [[ "$IP_BLOCK_EXPIRY" -gt 0 ]]; then
-            track_blocked_ip "$ip"
-        fi
-
-        # Queue for AbuseIPDB reporting
-        queue_abuseipdb_report "$ip" "1" "caught from temp block on $cidr"
-
-        ((ip_count++))
-    done
-
-    echo "$ip_count"
+    mv "$temp_file" "$CAUGHT_IPS_FILE"
 }
 
 # Release a temporary range block
@@ -629,11 +705,6 @@ release_temp_range() {
     local range=$1
     local cidr="$range.0.0/16"
 
-    # Harvest IPs before releasing
-    local caught_count=$(harvest_ips_from_range "$range")
-
-    # Remove the LOG rule
-    iptables -D INPUT -s "$cidr" -j LOG --log-prefix "${LOG_PREFIX}-${range}: " --log-level 4 2>/dev/null
     # Remove the DROP rule
     iptables -D INPUT -s "$cidr" -j DROP 2>/dev/null
 
@@ -641,7 +712,7 @@ release_temp_range() {
     grep -v "^$range " "$TEMP_RANGES_FILE" > "$TEMP_RANGES_FILE.tmp" 2>/dev/null
     mv "$TEMP_RANGES_FILE.tmp" "$TEMP_RANGES_FILE" 2>/dev/null
 
-    echo "$(date): Released $cidr, caught and banned $caught_count individual IPs" >> $LOGFILE
+    echo "$(date): Released temp block on $cidr" >> $LOGFILE
 }
 
 # Check and process expired temporary range blocks
@@ -657,7 +728,7 @@ check_temp_range_expiry() {
     done < "$TEMP_RANGES_FILE"
 }
 
-# Check and remove expired IP blocks
+# Check and remove expired IP blocks (temp IPs only)
 check_ip_expiry() {
     [[ "$IP_BLOCK_EXPIRY" -eq 0 ]] && return
 
@@ -673,12 +744,12 @@ check_ip_expiry() {
         else
             remaining+="$ip $timestamp"$'\n'
         fi
-    done < "$BLOCKED_IPS_FILE"
+    done < "$TEMP_IPS_FILE"
 
-    echo -n "$remaining" > "$BLOCKED_IPS_FILE"
+    echo -n "$remaining" > "$TEMP_IPS_FILE"
 }
 
-# Check and remove expired range blocks (permanent mode only)
+# Check and remove expired range blocks (permanent ranges only)
 check_range_expiry() {
     [[ "$RANGE_BLOCK_EXPIRY" -eq 0 ]] && return
 
@@ -695,9 +766,9 @@ check_range_expiry() {
         else
             remaining+="$range $timestamp"$'\n'
         fi
-    done < "$BLOCKED_RANGES_FILE"
+    done < "$PERM_RANGES_FILE"
 
-    echo -n "$remaining" > "$BLOCKED_RANGES_FILE"
+    echo -n "$remaining" > "$PERM_RANGES_FILE"
 }
 
 init_ipset() {
@@ -928,6 +999,7 @@ fi
 init_ipset
 update_cloudflare_ips
 update_abuseipdb_blacklist
+restore_blocks
 
 # Main loop
 while true; do
@@ -1001,6 +1073,24 @@ while true; do
             block_ip "$ip" "$count" "threshold exceeded"
         fi
     done
+
+    # Catch IPs from temporarily blocked ranges
+    if [[ "$BLOCK_MODE" == "temporary" && -s "$TEMP_RANGES_FILE" ]]; then
+        while read -r range timestamp; do
+            [[ -z "$range" ]] && continue
+
+            # Get IPs currently connecting from this range
+            ss -tan '( sport = :80 or sport = :443 )' 2>/dev/null | \
+                grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | \
+                grep "^${range}\." | sort -u | \
+            while read ip; do
+                catch_ip_from_range "$ip" "$range"
+            done
+        done < "$TEMP_RANGES_FILE"
+
+        # Process any caught IPs
+        process_caught_ips
+    fi
 
     # Process AbuseIPDB report queue (rate-limited)
     process_abuseipdb_queue
