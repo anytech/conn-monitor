@@ -123,6 +123,7 @@ show_status() {
     echo "  THRESHOLD=${THRESHOLD:-100}"
     echo "  SUBNET_THRESHOLD=${SUBNET_THRESHOLD:-75}"
     echo "  SERVER_IP=${SERVER_IP:-YOUR_SERVER_IP}"
+    echo "  PORTS=${PORTS:-80 443}"
     echo "  BLOCK_MODE=${BLOCK_MODE:-permanent}"
     echo "  TEMP_BLOCK_DURATION=${TEMP_BLOCK_DURATION:-3600}"
     echo "  IP_BLOCK_EXPIRY=${IP_BLOCK_EXPIRY:-0}"
@@ -1158,6 +1159,8 @@ update_cloudflare_ips
 update_abuseipdb_blacklist
 restore_blocks
 
+echo "$(date): conn-monitor started - monitoring ports: $PORTS" >> $LOGFILE
+
 # Main loop
 while true; do
     NOW=$(date +%s)
@@ -1202,11 +1205,23 @@ while true; do
         fi
     done
 
-    # Check per IP
-    ss -tan "$(build_ss_filter)" 2>/dev/null | \
-        grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | \
-        grep -v "$SERVER_IP" | \
-        sort | uniq -c | sort -rn | \
+    # Check per IP (with port info)
+    # Parse ss output to get IP and port info
+    local ss_output=$(ss -tan "$(build_ss_filter)" 2>/dev/null | awk '
+        NR>1 {
+            split($4, local, ":")
+            port = local[length(local)]
+            split($5, remote, ":")
+            ip = remote[1]
+            if (ip ~ /^::ffff:/) { gsub(/^::ffff:/, "", ip) }
+            if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
+                print ip, port
+            }
+        }
+    ')
+
+    # Get unique IPs with total counts
+    echo "$ss_output" | awk '{print $1}' | grep -v "^$SERVER_IP$" | sort | uniq -c | sort -rn | \
     while read count ip; do
         [[ -z "$ip" ]] && continue
 
@@ -1220,15 +1235,18 @@ while true; do
             continue
         fi
 
+        # Get the primary port this IP is connecting to (most frequent)
+        local primary_port=$(echo "$ss_output" | awk -v ip="$ip" '$1==ip {print $2}' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
+
         # Block if on AbuseIPDB blacklist (proactive blocking)
         if is_blacklisted "$ip"; then
-            block_ip "$ip" "$count" "AbuseIPDB blacklist"
+            block_ip "$ip" "$count" "AbuseIPDB blacklist (port $primary_port)"
             continue
         fi
 
         # Block if over threshold
         if [[ "$count" -gt "$THRESHOLD" ]]; then
-            block_ip "$ip" "$count" "Connection flood ($count connections)"
+            block_ip "$ip" "$count" "Connection flood ($count connections on port $primary_port)"
         fi
     done
 
