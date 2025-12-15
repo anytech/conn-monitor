@@ -138,7 +138,8 @@ show_status() {
     fi
 
     echo "Blocked IPs (iptables):"
-    iptables -L INPUT -n 2>/dev/null | grep DROP | head -20 || echo "  (none or no permission)"
+    local blocked_count=$(iptables -L INPUT -n 2>/dev/null | grep -c DROP || echo "0")
+    echo "  $blocked_count IPs/ranges blocked"
     echo ""
 
     echo "Service status:"
