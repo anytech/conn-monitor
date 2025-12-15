@@ -622,7 +622,7 @@ process_abuseipdb_queue() {
     local reason=$(echo "$entry" | cut -d'|' -f3)
 
     # Build comment
-    local comment="Blocked by conn-monitor: $count connections ($reason)"
+    local comment="Blocked by conn-monitor: $reason"
 
     # Submit report
     local response=$(curl -s --connect-timeout 10 -X POST \
@@ -720,7 +720,7 @@ block_range_temporary() {
 
     # Queue range for AbuseIPDB reporting (paid tier only)
     if [[ "$ABUSEIPDB_REPORT_RANGES" == "yes" ]]; then
-        queue_abuseipdb_report "$cidr" "$count" "subnet flood (temp block)"
+        queue_abuseipdb_report "$cidr" "$count" "DDoS attack from subnet $cidr"
     fi
 
     echo "$(date): Temporary block on $cidr ($count connections) for ${TEMP_BLOCK_DURATION}s" >> $LOGFILE
@@ -747,7 +747,7 @@ block_range_permanent() {
 
     # Queue range for AbuseIPDB reporting (paid tier only)
     if [[ "$ABUSEIPDB_REPORT_RANGES" == "yes" ]]; then
-        queue_abuseipdb_report "$cidr" "$count" "subnet flood"
+        queue_abuseipdb_report "$cidr" "$count" "DDoS attack from subnet $cidr"
     fi
 
     echo "$(date): Blocked subnet $cidr ($count connections)" >> $LOGFILE
@@ -828,7 +828,7 @@ process_caught_ips() {
             fi
 
             # Queue for AbuseIPDB reporting
-            queue_abuseipdb_report "$ip" "1" "caught from temp block on $range.0.0/16"
+            queue_abuseipdb_report "$ip" "1" "DDoS attack from subnet $range.0.0/16"
 
             echo "$(date): Blocked IP $ip (caught from temp block on $range.0.0/16)" >> $LOGFILE
         fi
@@ -1120,7 +1120,7 @@ do_block() {
         # Report range if requested (and paid tier)
         if [[ "$report_to_abuseipdb" == true ]]; then
             if [[ "$ABUSEIPDB_REPORT_RANGES" == "yes" ]]; then
-                queue_abuseipdb_report "$target" "manual" "manual block"
+                queue_abuseipdb_report "$target" "manual" "DDoS attack from subnet $target"
                 echo "Queued for AbuseIPDB report"
             else
                 echo "Note: Range reporting requires ABUSEIPDB_REPORT_RANGES=yes (paid tier)"
@@ -1133,12 +1133,12 @@ do_block() {
             exit 1
         fi
 
-        block_ip "$target" "manual" "manual block"
+        block_ip "$target" "manual" "Connection flood (manual block)"
         echo "Blocked IP: $target"
 
         # Report to AbuseIPDB if requested
         if [[ "$report_to_abuseipdb" == true ]]; then
-            queue_abuseipdb_report "$target" "manual" "manual block"
+            queue_abuseipdb_report "$target" "manual" "Connection flood (manual block)"
             echo "Queued for AbuseIPDB report"
         fi
     fi
@@ -1228,7 +1228,7 @@ while true; do
 
         # Block if over threshold
         if [[ "$count" -gt "$THRESHOLD" ]]; then
-            block_ip "$ip" "$count" "threshold exceeded"
+            block_ip "$ip" "$count" "Connection flood ($count connections)"
         fi
     done
 
