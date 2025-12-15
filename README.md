@@ -1,8 +1,10 @@
 # conn-monitor
 
-Automatic connection flood monitor and blocker for Linux web servers.
+**DDoS Protection for Linux Servers** - Automatic connection flood detection and IP blocking.
 
-Monitors active TCP connections on ports 80/443 and automatically blocks IP addresses or /16 subnets that exceed configurable thresholds. Designed for servers behind Cloudflare with proper whitelisting to prevent false positives.
+Stop DDoS attacks in real-time. conn-monitor detects and blocks malicious IPs and botnets automatically, protecting your web server from connection floods, HTTP floods, and distributed denial-of-service attacks.
+
+Monitors active TCP connections on configurable ports (default 80/443) and automatically blocks IP addresses or /16 subnets that exceed configurable thresholds. Works standalone or behind Cloudflare with proper whitelisting to prevent false positives.
 
 ## Features
 
@@ -64,6 +66,7 @@ All settings can be configured in three ways:
 | `SUBNET_THRESHOLD` | `75` | Block /16 subnets exceeding this many connections |
 | `SERVER_IP` | `YOUR_SERVER_IP` | Your server's IP (excluded from monitoring) |
 | `STATIC_WHITELIST` | `127.0.0 10.0.0 192.168` | Space-separated IP prefixes to never block |
+| `PORTS` | `80 443` | Space-separated ports to monitor (e.g., `80 443 8080 3000 22`) |
 | `IP_BLOCK_EXPIRY` | `0` | Seconds until IP blocks expire (0 = permanent) |
 | `RANGE_BLOCK_EXPIRY` | `0` | Seconds until range blocks expire (0 = permanent) |
 | `BLOCK_MODE` | `permanent` | `permanent` or `temporary` for /16 ranges |

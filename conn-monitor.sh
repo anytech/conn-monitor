@@ -29,7 +29,7 @@ BLACKLIST_CACHE_FILE="$CONN_MONITOR_DATA_DIR/blacklist-cache.log"
 BLACKLIST_CACHE_TIME="$CONN_MONITOR_DATA_DIR/blacklist-cache.time"
 
 # Valid configuration variables
-VALID_VARS="THRESHOLD SUBNET_THRESHOLD SERVER_IP STATIC_WHITELIST LOGFILE CF_UPDATE_INTERVAL IP_BLOCK_EXPIRY RANGE_BLOCK_EXPIRY BLOCK_MODE TEMP_BLOCK_DURATION ABUSEIPDB_ENABLED ABUSEIPDB_KEY ABUSEIPDB_CATEGORIES ABUSEIPDB_RATE_LIMIT ABUSEIPDB_REPORT_RANGES ABUSEIPDB_BLACKLIST_ENABLED ABUSEIPDB_BLACKLIST_CONFIDENCE ABUSEIPDB_BLACKLIST_LIMIT ABUSEIPDB_BLACKLIST_INTERVAL ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY"
+VALID_VARS="THRESHOLD SUBNET_THRESHOLD SERVER_IP STATIC_WHITELIST LOGFILE CF_UPDATE_INTERVAL IP_BLOCK_EXPIRY RANGE_BLOCK_EXPIRY BLOCK_MODE TEMP_BLOCK_DURATION ABUSEIPDB_ENABLED ABUSEIPDB_KEY ABUSEIPDB_CATEGORIES ABUSEIPDB_RATE_LIMIT ABUSEIPDB_REPORT_RANGES ABUSEIPDB_BLACKLIST_ENABLED ABUSEIPDB_BLACKLIST_CONFIDENCE ABUSEIPDB_BLACKLIST_LIMIT ABUSEIPDB_BLACKLIST_INTERVAL ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY PORTS"
 
 # Show help
 show_help() {
@@ -67,6 +67,7 @@ Configuration Variables:
   SUBNET_THRESHOLD      Block /16 subnets exceeding this (default: 75)
   SERVER_IP             Your server IP, excluded from monitoring
   STATIC_WHITELIST      Space-separated IP prefixes to never block
+  PORTS                 Space-separated ports to monitor (default: 80 443)
   LOGFILE               Log file location (default: /var/log/conn-monitor.log)
   CF_UPDATE_INTERVAL    Seconds between Cloudflare IP updates (default: 86400)
 
@@ -411,6 +412,9 @@ STATIC_WHITELIST="${STATIC_WHITELIST:-127.0.0 10.0.0 192.168}"
 # How often to refresh Cloudflare IPs (seconds)
 CF_UPDATE_INTERVAL="${CF_UPDATE_INTERVAL:-86400}"
 
+# Ports to monitor (space-separated)
+PORTS="${PORTS:-80 443}"
+
 # === BLOCK EXPIRY SETTINGS ===
 
 # IP block expiry (seconds). 0 = permanent (never expires)
@@ -473,6 +477,20 @@ ABUSEIPDB_BLACKLIST_INTERVAL="${ABUSEIPDB_BLACKLIST_INTERVAL:-86400}"
 ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY="${ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY:-2592000}"
 
 # === END CONFIGURATION ===
+
+# Build ss filter string from PORTS variable
+build_ss_filter() {
+    local filter=""
+    for port in $PORTS; do
+        if [[ -z "$filter" ]]; then
+            filter="( sport = :$port"
+        else
+            filter="$filter or sport = :$port"
+        fi
+    done
+    filter="$filter )"
+    echo "$filter"
+}
 
 LAST_CF_UPDATE=0
 LAST_ABUSEIPDB_REPORT=0
@@ -1158,8 +1176,8 @@ while true; do
         check_temp_range_expiry
     fi
 
-    # Check per /16 subnet on ports 80/443
-    ss -tan '( sport = :80 or sport = :443 )' 2>/dev/null | \
+    # Check per /16 subnet
+    ss -tan "$(build_ss_filter)" 2>/dev/null | \
         grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | \
         grep -v "$SERVER_IP" | \
         cut -d. -f1-2 | sort | uniq -c | sort -rn | \
@@ -1184,8 +1202,8 @@ while true; do
         fi
     done
 
-    # Check per IP on ports 80/443
-    ss -tan '( sport = :80 or sport = :443 )' 2>/dev/null | \
+    # Check per IP
+    ss -tan "$(build_ss_filter)" 2>/dev/null | \
         grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | \
         grep -v "$SERVER_IP" | \
         sort | uniq -c | sort -rn | \
@@ -1220,7 +1238,7 @@ while true; do
             [[ -z "$range" ]] && continue
 
             # Get IPs currently connecting from this range
-            ss -tan '( sport = :80 or sport = :443 )' 2>/dev/null | \
+            ss -tan "$(build_ss_filter)" 2>/dev/null | \
                 grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | \
                 grep "^${range}\." | sort -u | \
             while read ip; do
