@@ -54,9 +54,9 @@ Dependencies are installed automatically:
 
 All settings can be configured in three ways:
 
-1. **Edit the script directly** - Modify defaults in `/usr/local/bin/conn-monitor.sh`
-2. **Environment file** - Create `/etc/default/conn-monitor` with settings
-3. **Systemd service** - Uncomment and modify lines in `/etc/systemd/system/conn-monitor.service`
+1. **Config file** - Use `conn-monitor.sh config set VAR=value` (recommended)
+2. **Edit directly** - Modify `/etc/conn-monitor/conn-monitor`
+3. **Systemd service** - Add Environment lines in `/etc/systemd/system/conn-monitor.service`
 
 ### Configuration Options
 
@@ -66,7 +66,7 @@ All settings can be configured in three ways:
 | `SUBNET_THRESHOLD` | `75` | Block /16 subnets exceeding this many connections |
 | `SERVER_IP` | `YOUR_SERVER_IP` | Your server's IP (excluded from monitoring) |
 | `STATIC_WHITELIST` | `127.0.0 10.0.0 192.168` | Space-separated IP prefixes to never block |
-| `PORTS` | `80 443` | Space-separated ports to monitor (e.g., `80 443 8080 3000 22`) |
+| `PORTS` | `80,443` | Comma-separated ports to monitor (e.g., `80,443,8080,3000,22`) |
 | `IP_BLOCK_EXPIRY` | `0` | Seconds until IP blocks expire (0 = permanent) |
 | `RANGE_BLOCK_EXPIRY` | `0` | Seconds until range blocks expire (0 = permanent) |
 | `BLOCK_MODE` | `permanent` | `permanent` or `temporary` for /16 ranges |
@@ -83,28 +83,23 @@ All settings can be configured in three ways:
 | `ABUSEIPDB_BLACKLIST_LIMIT` | `1000` | Max IPs to fetch from blacklist (free tier: 10,000/day) |
 | `ABUSEIPDB_BLACKLIST_BLOCK_EXPIRY` | `2592000` | Seconds until blacklist blocks expire (30 days) |
 
-### Example: Using Environment File
+### Example: Using Config Command
 
-Create `/etc/default/conn-monitor`:
 ```bash
-# Enable temporary range blocks with 1-hour capture window
-BLOCK_MODE=temporary
-TEMP_BLOCK_DURATION=3600
+# Enable temporary range blocks with 24-hour capture window
+sudo conn-monitor.sh config set BLOCK_MODE=temporary TEMP_BLOCK_DURATION=86400
 
 # Auto-expire individual IP blocks after 24 hours
-IP_BLOCK_EXPIRY=86400
+sudo conn-monitor.sh config set IP_BLOCK_EXPIRY=86400
 
-# Your server's IP
-SERVER_IP=203.0.113.50
+# Set your server's IP
+sudo conn-monitor.sh config set SERVER_IP=203.0.113.50
 
-# Add your management IP to whitelist
-STATIC_WHITELIST="127.0.0 10.0.0 192.168 YOUR.MGMT.IP"
+# Add ports to monitor
+sudo conn-monitor.sh config set PORTS=80,443,22
 ```
 
-Then enable in the service file by uncommenting:
-```
-EnvironmentFile=-/etc/default/conn-monitor
-```
+Or edit `/etc/conn-monitor/conn-monitor` directly.
 
 ### Example: Systemd Service Configuration
 
@@ -177,12 +172,10 @@ Optionally report blocked IPs to [AbuseIPDB](https://www.abuseipdb.com/) to cont
 
 1. Create a free account at https://www.abuseipdb.com/
 2. Get your API key from https://www.abuseipdb.com/account/api
-3. Configure the environment variables:
+3. Configure:
 
 ```bash
-# In /etc/default/conn-monitor or systemd service
-ABUSEIPDB_ENABLED=yes
-ABUSEIPDB_KEY=your_api_key_here
+sudo conn-monitor.sh config set ABUSEIPDB_ENABLED=yes ABUSEIPDB_KEY=your_api_key_here
 ```
 
 ### Free vs Paid Tiers

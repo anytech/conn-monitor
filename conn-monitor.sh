@@ -11,11 +11,11 @@
 #
 
 VERSION="1.2.0"
-CONFIG_FILE="/etc/default/conn-monitor"
-LOGFILE="${LOGFILE:-/var/log/conn-monitor.log}"
 
 # Data directory for persistent files
 CONN_MONITOR_DATA_DIR="/etc/conn-monitor"
+CONFIG_FILE="$CONN_MONITOR_DATA_DIR/conn-monitor"
+LOGFILE="${LOGFILE:-/var/log/conn-monitor.log}"
 
 # Data files (persistent across restarts)
 TEMP_IPS_FILE="$CONN_MONITOR_DATA_DIR/temp-ips.log"
@@ -67,7 +67,7 @@ Configuration Variables:
   SUBNET_THRESHOLD      Block /16 subnets exceeding this (default: 75)
   SERVER_IP             Your server IP, excluded from monitoring
   STATIC_WHITELIST      Space-separated IP prefixes to never block
-  PORTS                 Space-separated ports to monitor (default: 80 443)
+  PORTS                 Comma-separated ports to monitor (default: 80,443)
   LOGFILE               Log file location (default: /var/log/conn-monitor.log)
   CF_UPDATE_INTERVAL    Seconds between Cloudflare IP updates (default: 86400)
 
@@ -119,10 +119,15 @@ show_status() {
     # Load config if exists
     [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 
+    # Convert commas to spaces for PORTS display
+    local ports_display="${PORTS:-80,443}"
+    ports_display="${ports_display//,/ }"
+
     echo "Current Configuration:"
     echo "  THRESHOLD=${THRESHOLD:-100}"
     echo "  SUBNET_THRESHOLD=${SUBNET_THRESHOLD:-75}"
     echo "  SERVER_IP=${SERVER_IP:-YOUR_SERVER_IP}"
+    echo "  PORTS=$ports_display"
     echo "  BLOCK_MODE=${BLOCK_MODE:-permanent}"
     echo "  TEMP_BLOCK_DURATION=${TEMP_BLOCK_DURATION:-3600}"
     echo "  IP_BLOCK_EXPIRY=${IP_BLOCK_EXPIRY:-0}"
@@ -412,8 +417,10 @@ STATIC_WHITELIST="${STATIC_WHITELIST:-127.0.0 10.0.0 192.168}"
 # How often to refresh Cloudflare IPs (seconds)
 CF_UPDATE_INTERVAL="${CF_UPDATE_INTERVAL:-86400}"
 
-# Ports to monitor (space-separated)
-PORTS="${PORTS:-80 443}"
+# Ports to monitor (comma-separated)
+PORTS="${PORTS:-80,443}"
+# Convert commas to spaces for internal use
+PORTS="${PORTS//,/ }"
 
 # === BLOCK EXPIRY SETTINGS ===
 
@@ -1158,6 +1165,8 @@ update_cloudflare_ips
 update_abuseipdb_blacklist
 restore_blocks
 
+echo "$(date): conn-monitor started - monitoring ports: $PORTS" >> $LOGFILE
+
 # Main loop
 while true; do
     NOW=$(date +%s)
@@ -1202,11 +1211,23 @@ while true; do
         fi
     done
 
-    # Check per IP
-    ss -tan "$(build_ss_filter)" 2>/dev/null | \
-        grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | \
-        grep -v "$SERVER_IP" | \
-        sort | uniq -c | sort -rn | \
+    # Check per IP (with port info)
+    # Parse ss output to get IP and port info
+    local ss_output=$(ss -tan "$(build_ss_filter)" 2>/dev/null | awk '
+        NR>1 {
+            split($4, local, ":")
+            port = local[length(local)]
+            split($5, remote, ":")
+            ip = remote[1]
+            if (ip ~ /^::ffff:/) { gsub(/^::ffff:/, "", ip) }
+            if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
+                print ip, port
+            }
+        }
+    ')
+
+    # Get unique IPs with total counts
+    echo "$ss_output" | awk '{print $1}' | grep -v "^$SERVER_IP$" | sort | uniq -c | sort -rn | \
     while read count ip; do
         [[ -z "$ip" ]] && continue
 
@@ -1220,15 +1241,18 @@ while true; do
             continue
         fi
 
+        # Get the primary port this IP is connecting to (most frequent)
+        local primary_port=$(echo "$ss_output" | awk -v ip="$ip" '$1==ip {print $2}' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
+
         # Block if on AbuseIPDB blacklist (proactive blocking)
         if is_blacklisted "$ip"; then
-            block_ip "$ip" "$count" "AbuseIPDB blacklist"
+            block_ip "$ip" "$count" "AbuseIPDB blacklist (port $primary_port)"
             continue
         fi
 
         # Block if over threshold
         if [[ "$count" -gt "$THRESHOLD" ]]; then
-            block_ip "$ip" "$count" "Connection flood ($count connections)"
+            block_ip "$ip" "$count" "Connection flood ($count connections on port $primary_port)"
         fi
     done
 
